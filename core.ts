@@ -166,9 +166,23 @@ async function analyzeFromExports(
   }
 
   // Now analyze JSDoc for all traced symbols
+  // Collect all unique exports by their source to avoid duplicates
+  const uniqueExports = new Map<string, TracedExport>();
   for (const [_filePath, exports] of exportMap.entries()) {
-    await analyzeFileForJSDoc(exports, symbols, rootPath);
+    for (const exp of exports) {
+      const key = `${exp.sourcePath}:${exp.originalName}:${exp.exportedName}`;
+      if (!uniqueExports.has(key)) {
+        uniqueExports.set(key, exp);
+      }
+    }
   }
+
+  // Analyze only unique exports
+  await analyzeFileForJSDoc(
+    Array.from(uniqueExports.values()),
+    symbols,
+    rootPath,
+  );
 }
 
 async function traceExportsFromFile(
@@ -289,11 +303,16 @@ async function traceExportsFromFile(
                 });
               } else {
                 // Treat as a local export if we can't find the import
+                // Find the actual definition line in this file
+                const lineNum = await findSymbolInFile(
+                  filePath,
+                  originalName,
+                );
                 addExport(exportMap, filePath, {
                   originalName,
                   exportedName: exportedName || originalName,
                   sourcePath: filePath,
-                  line: i + 1,
+                  line: lineNum || i + 1,
                 });
               }
             }
@@ -433,6 +452,23 @@ async function findSymbolInFile(
           return i + 1;
         }
       }
+
+      // Also check for non-exported declarations (class, function, interface, type, enum, const)
+      // that might be exported later with export { ... }
+      const patterns = [
+        new RegExp(`^(?:async\\s+)?function\\s+${symbolName}\\b`),
+        new RegExp(`^class\\s+${symbolName}\\b`),
+        new RegExp(`^interface\\s+${symbolName}\\b`),
+        new RegExp(`^type\\s+${symbolName}\\b`),
+        new RegExp(`^enum\\s+${symbolName}\\b`),
+        new RegExp(`^(?:const|let|var)\\s+${symbolName}\\b`),
+      ];
+
+      for (const pattern of patterns) {
+        if (pattern.test(line)) {
+          return i + 1;
+        }
+      }
     }
   } catch {
     // Ignore errors
@@ -508,9 +544,18 @@ async function analyzeFileForJSDoc(
   symbols: ExportedSymbol[],
   rootPath: string,
 ): Promise<void> {
-  // Group exports by their source file
+  // Group exports by their source file and deduplicate
   const exportsBySource = new Map<string, TracedExport[]>();
+  const seenExports = new Set<string>();
+
   for (const exp of exports) {
+    // Create a unique key for deduplication
+    const key = `${exp.sourcePath}:${exp.exportedName}:${exp.originalName}`;
+    if (seenExports.has(key)) {
+      continue; // Skip duplicates
+    }
+    seenExports.add(key);
+
     if (!exportsBySource.has(exp.sourcePath)) {
       exportsBySource.set(exp.sourcePath, []);
     }
@@ -534,27 +579,42 @@ async function analyzeFileForJSDoc(
 
         // Track JSDoc blocks
         if (trimmed.startsWith("/**")) {
-          currentJSDoc = [trimmed];
+          if (trimmed.endsWith("*/")) {
+            const jsDocContent = trimmed;
+            if (!jsDocContent.includes("@module")) {
+              for (let j = i + 1; j < lines.length; j++) {
+                const nextLine = lines[j].trim();
+                if (nextLine && !nextLine.startsWith("//")) {
+                  if (
+                    isDirectExport(nextLine) || nextLine.startsWith("export ")
+                  ) {
+                    jsDocBlocks.set(j, jsDocContent);
+                    for (let k = j + 1; k <= j + 5 && k < lines.length; k++) {
+                      jsDocBlocks.set(k, jsDocContent);
+                    }
+                  }
+                  break;
+                }
+              }
+            }
+          } else {
+            currentJSDoc = [trimmed];
+          }
         } else if (currentJSDoc.length > 0) {
           currentJSDoc.push(line);
           if (trimmed.endsWith("*/")) {
-            // JSDoc block complete, associate with next code line
             const jsDocContent = currentJSDoc.join("\n");
-            // Skip module-level JSDoc (contains @module tag)
             if (jsDocContent.includes("@module")) {
               currentJSDoc = [];
               continue;
             }
-            // Find the next line that starts an export declaration
             for (let j = i + 1; j < lines.length; j++) {
               const nextLine = lines[j].trim();
               if (nextLine && !nextLine.startsWith("//")) {
-                // Only associate JSDoc with export declarations
                 if (
                   isDirectExport(nextLine) || nextLine.startsWith("export ")
                 ) {
                   jsDocBlocks.set(j, jsDocContent);
-                  // Mark next 5 lines as having this JSDoc (for multi-line declarations)
                   for (let k = j + 1; k <= j + 5 && k < lines.length; k++) {
                     jsDocBlocks.set(k, jsDocContent);
                   }
@@ -598,6 +658,48 @@ async function analyzeFileForJSDoc(
                 );
                 if (symbol) {
                   // Use the exported name from our trace
+                  symbol.name = exp.exportedName;
+                  symbols.push(symbol);
+                }
+                break;
+              }
+            }
+          }
+        } else {
+          // Check for non-exported declarations that match symbols in sourceExports
+          for (const exp of sourceExports) {
+            const patterns = [
+              `class ${exp.originalName}`,
+              `function ${exp.originalName}`,
+              `const ${exp.originalName}`,
+              `let ${exp.originalName}`,
+              `var ${exp.originalName}`,
+              `interface ${exp.originalName}`,
+              `type ${exp.originalName}`,
+              `enum ${exp.originalName}`,
+            ];
+
+            for (const pattern of patterns) {
+              if (trimmed.startsWith(pattern)) {
+                let fullDeclaration = trimmed;
+                const declarationStartLine = i;
+
+                if (!trimmed.includes("{") && !trimmed.includes(";")) {
+                  for (let j = i + 1; j < lines.length && j < i + 10; j++) {
+                    fullDeclaration += " " + lines[j].trim();
+                    if (lines[j].includes("{") || lines[j].includes(";")) {
+                      break;
+                    }
+                  }
+                }
+
+                const symbol = parseExportedSymbol(
+                  fullDeclaration,
+                  declarationStartLine,
+                  relativePath,
+                  jsDocBlocks,
+                );
+                if (symbol) {
                   symbol.name = exp.exportedName;
                   symbols.push(symbol);
                 }
@@ -688,11 +790,20 @@ async function analyzeFile(
 
     // Track JSDoc blocks
     if (trimmed.startsWith("/**")) {
-      currentJSDoc = [trimmed];
+      if (trimmed.endsWith("*/")) {
+        const jsDocContent = trimmed;
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j].trim() && !lines[j].trim().startsWith("//")) {
+            jsDocBlocks.set(j, jsDocContent);
+            break;
+          }
+        }
+      } else {
+        currentJSDoc = [trimmed];
+      }
     } else if (currentJSDoc.length > 0) {
       currentJSDoc.push(line);
       if (trimmed.endsWith("*/")) {
-        // JSDoc block complete, associate with next code line
         const jsDocContent = currentJSDoc.join("\n");
         for (let j = i + 1; j < lines.length; j++) {
           if (lines[j].trim() && !lines[j].trim().startsWith("//")) {
@@ -820,6 +931,48 @@ function parseExportedSymbol(
         name = exports[0].split(/\s+as\s+/)[0];
         type = "variable"; // We'd need more context to determine the actual type
       }
+    }
+  } // Parse non-exported declarations
+  else if (trimmed.startsWith("class ")) {
+    const match = trimmed.match(/class\s+(\w+)/);
+    if (match) {
+      name = match[1];
+      type = "class";
+    }
+  } else if (
+    trimmed.startsWith("function ") || trimmed.startsWith("async function ")
+  ) {
+    const match = trimmed.match(/function\s+(\w+)/);
+    if (match) {
+      name = match[1];
+      type = "function";
+    }
+  } else if (trimmed.startsWith("interface ")) {
+    const match = trimmed.match(/interface\s+(\w+)/);
+    if (match) {
+      name = match[1];
+      type = "interface";
+    }
+  } else if (trimmed.startsWith("type ")) {
+    const match = trimmed.match(/type\s+(\w+)/);
+    if (match) {
+      name = match[1];
+      type = "type";
+    }
+  } else if (trimmed.startsWith("enum ")) {
+    const match = trimmed.match(/enum\s+(\w+)/);
+    if (match) {
+      name = match[1];
+      type = "enum";
+    }
+  } else if (
+    trimmed.startsWith("const ") || trimmed.startsWith("let ") ||
+    trimmed.startsWith("var ")
+  ) {
+    const match = trimmed.match(/(?:const|let|var)\s+(\w+)/);
+    if (match) {
+      name = match[1];
+      type = trimmed.startsWith("const") ? "const" : "variable";
     }
   }
 
