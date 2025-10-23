@@ -434,6 +434,10 @@ async function resolveImportPath(
   return null;
 }
 
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function findSymbolInFile(
   filePath: string,
   symbolName: string,
@@ -456,12 +460,12 @@ async function findSymbolInFile(
       // Also check for non-exported declarations (class, function, interface, type, enum, const)
       // that might be exported later with export { ... }
       const patterns = [
-        new RegExp(`^(?:async\\s+)?function\\s+${symbolName}\\b`),
-        new RegExp(`^class\\s+${symbolName}\\b`),
-        new RegExp(`^interface\\s+${symbolName}\\b`),
-        new RegExp(`^type\\s+${symbolName}\\b`),
-        new RegExp(`^enum\\s+${symbolName}\\b`),
-        new RegExp(`^(?:const|let|var)\\s+${symbolName}\\b`),
+        new RegExp(`^(?:async\\s+)?function\\s+${escapeRegExp(symbolName)}\\b`),
+        new RegExp(`^class\\s+${escapeRegExp(symbolName)}\\b`),
+        new RegExp(`^interface\\s+${escapeRegExp(symbolName)}\\b`),
+        new RegExp(`^type\\s+${escapeRegExp(symbolName)}\\b`),
+        new RegExp(`^enum\\s+${escapeRegExp(symbolName)}\\b`),
+        new RegExp(`^(?:const|let|var)\\s+${escapeRegExp(symbolName)}\\b`),
       ];
 
       for (const pattern of patterns) {
@@ -669,18 +673,18 @@ async function analyzeFileForJSDoc(
           // Check for non-exported declarations that match symbols in sourceExports
           for (const exp of sourceExports) {
             const patterns = [
-              `class ${exp.originalName}`,
-              `function ${exp.originalName}`,
-              `const ${exp.originalName}`,
-              `let ${exp.originalName}`,
-              `var ${exp.originalName}`,
-              `interface ${exp.originalName}`,
-              `type ${exp.originalName}`,
-              `enum ${exp.originalName}`,
+              new RegExp(`^class\\s+${escapeRegExp(exp.originalName)}\\b`),
+              new RegExp(`^(?:async\\s+)?function\\s+${escapeRegExp(exp.originalName)}\\b`),
+              new RegExp(`^const\\s+${escapeRegExp(exp.originalName)}\\b`),
+              new RegExp(`^let\\s+${escapeRegExp(exp.originalName)}\\b`),
+              new RegExp(`^var\\s+${escapeRegExp(exp.originalName)}\\b`),
+              new RegExp(`^interface\\s+${escapeRegExp(exp.originalName)}\\b`),
+              new RegExp(`^type\\s+${escapeRegExp(exp.originalName)}\\b`),
+              new RegExp(`^enum\\s+${escapeRegExp(exp.originalName)}\\b`),
             ];
 
             for (const pattern of patterns) {
-              if (trimmed.startsWith(pattern)) {
+              if (pattern.test(trimmed)) {
                 let fullDeclaration = trimmed;
                 const declarationStartLine = i;
 

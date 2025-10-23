@@ -144,3 +144,25 @@ Deno.test("analyzeDirectory - tracks symbol types correctly", async () => {
   assertEquals(byType["interface"]?.total, 1);
   assertEquals(byType["const"]?.total, 1);
 });
+
+Deno.test("analyzeDirectory - correctly matches symbols with prefix names", async () => {
+  const fixturesPath = join(
+    Deno.cwd(),
+    "tests",
+    "fixtures",
+    "prefix_bug",
+    "types.ts",
+  );
+
+  const result = await analyzeDirectory(fixturesPath);
+
+  assertEquals(result.symbols.length, 2);
+
+  const serverSymbol = result.symbols.find((s) => s.name === "Server");
+  assertEquals(serverSymbol?.type, "type");
+  assertEquals(serverSymbol?.line, 6);
+
+  const serverRateLimitSymbol = result.symbols.find((s) => s.name === "ServerRateLimitDescription");
+  assertEquals(serverRateLimitSymbol?.type, "type");
+  assertEquals(serverRateLimitSymbol?.line, 1);
+});
